@@ -1,0 +1,24 @@
+name = "volunteers-api"
+main = "src/worker.js"
+compatibility_date = "2026-04-18"
+workers_dev = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "def-volunteers"
+database_id = "2ac967ea-2f47-4265-808a-653a3f211005"
+
+[vars]
+# Admin allowlist (comma-separated, no spaces matter — they're trimmed)
+ADMIN_EMAILS = "sfoster@dsdmail.net,ktoone@dsdmail.net,kbuchi@dsdmail.net,kcrosby@dsdmail.net"
+
+# Secrets (set via `wrangler secret put` — NOT stored in this file):
+# SESSION_SECRET       — HMAC key for signing session cookies (32+ bytes random)
+# RESEND_API_KEY       — re_...
+# TWILIO_ACCOUNT_SID   — AC...
+# TWILIO_AUTH_TOKEN    — ...
+# TWILIO_FROM          — +18019236121
+
+[[routes]]
+pattern = "volunteers.daviskids.org/*"
+zone_name = "daviskids.org"
