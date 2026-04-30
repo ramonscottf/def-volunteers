@@ -447,10 +447,19 @@ router.post('/api/auth/magic-link/request', async (req, env) => {
 
   if (env.RESEND_API_KEY) {
     try {
-      await sendEmail(env, {
-        to: email,
-        subject: 'Your DEF Volunteer Admin sign-in link',
-        text:
+      // Use mail.fosterlabs.org pipe — verified gala@daviskids.org sender, proven reliable
+      const mailRes = await fetch('https://mail.fosterlabs.org/send', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer SkippyMail2026',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          to: email,
+          from: 'Davis Education Foundation <gala@daviskids.org>',
+          replyTo: 'smiggin@dsdmail.net',
+          subject: 'Your DEF Volunteer Admin sign-in link',
+          text:
 `Hi,
 
 Click this link to sign in to the DEF Volunteer Admin dashboard:
@@ -460,7 +469,7 @@ ${verifyUrl}
 This link expires in 15 minutes and can only be used once. If you didn't request this, you can ignore this email.
 
 — Davis Education Foundation`,
-        html: `<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:520px;margin:0 auto;padding:24px">
+          html: `<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:520px;margin:0 auto;padding:24px">
 <h2 style="color:#0d1b3d;margin:0 0 16px;font-family:Georgia,serif;font-weight:400">Your sign-in link</h2>
 <p style="color:#1a1a1a;line-height:1.5">Click the button below to sign in to the DEF Volunteer Admin dashboard.</p>
 <p style="margin:28px 0">
@@ -471,10 +480,16 @@ This link expires in 15 minutes and can only be used once. If you didn't request
 <hr style="border:0;border-top:1px solid #d8dde6;margin:28px 0 16px">
 <p style="color:#5a6276;font-size:12px">Davis Education Foundation</p>
 </div>`,
+        }),
       });
+      if (!mailRes.ok) {
+        const errText = await mailRes.text();
+        console.error('magic link email failed', mailRes.status, errText);
+        return err(500, 'failed to send sign-in email', { detail: `mail ${mailRes.status}` });
+      }
     } catch (e) {
       console.error('magic link email failed', e);
-      return err(500, 'failed to send sign-in email');
+      return err(500, 'failed to send sign-in email', { detail: String(e.message || e) });
     }
   } else {
     console.log('DEV: magic link =', verifyUrl);
