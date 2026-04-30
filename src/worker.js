@@ -15,6 +15,7 @@ const ALLOWED_ORIGINS = new Set([
   'https://childspree.org',
   'https://childspree.pages.dev',
   'https://def-site.pages.dev',
+  'https://gala.daviskids.org',
 ]);
 
 const MSAL_TENANT = '3d9cf274-547e-4af5-8dde-01a636e0b607';
@@ -342,7 +343,9 @@ router.post('/api/volunteers', async (req, env) => {
     .bind(body.event_slug).first();
   if (!evt || !evt.active) return err(400, 'unknown or inactive event');
 
-  const id = nanoid();
+  const upsert = body.upsert === true;
+  const isMirror = body.source === 'mirror';
+  const email = body.email.trim().toLowerCase();
   const now = new Date().toISOString();
 
   // Extract event_data (anything beyond known columns)
@@ -350,49 +353,95 @@ router.post('/api/volunteers', async (req, env) => {
     'event_slug', 'first_name', 'last_name', 'email', 'phone', 'organization',
     'group_type', 'group_size', 'shirt_size', 'role', 'location', 'shift',
     'arrival_time', 'early_arrival', 'experience', 'hear_about', 'sms_opt_in', 'notes',
+    'status', 'created_at', 'upsert', 'source',
   ]);
   const extra = {};
   for (const k of Object.keys(body)) if (!known.has(k)) extra[k] = body[k];
 
-  await env.DB.prepare(
-    `INSERT INTO volunteers
-      (id, event_slug, first_name, last_name, email, phone, organization,
-       group_type, group_size, shirt_size, role, location, shift,
-       arrival_time, early_arrival, experience, hear_about, sms_opt_in, notes,
-       status, event_data, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`
-  ).bind(
-    id, body.event_slug, body.first_name.trim(), body.last_name.trim(),
-    body.email.trim().toLowerCase(), body.phone || null, body.organization || null,
-    body.group_type || 'individual', body.group_size || 1, body.shirt_size || null,
-    body.role || null, body.location || null, body.shift || null,
-    body.arrival_time || null, body.early_arrival ? 1 : 0,
-    body.experience || null, body.hear_about || null,
-    body.sms_opt_in ? 1 : 0, body.notes || null,
-    Object.keys(extra).length ? JSON.stringify(extra) : null,
-    now, now,
-  ).run();
+  // Upsert: find existing row by (email, event_slug)
+  let existing = null;
+  if (upsert) {
+    existing = await env.DB.prepare(
+      `SELECT id FROM volunteers WHERE event_slug = ? AND lower(email) = ?`
+    ).bind(body.event_slug, email).first();
+  }
 
-  // Fire-and-forget confirmation email (don't block response)
-  if (env.RESEND_API_KEY) {
+  let id;
+  let action;
+  if (existing) {
+    id = existing.id;
+    action = 'updated';
+    await env.DB.prepare(
+      `UPDATE volunteers SET
+        first_name = ?, last_name = ?, phone = ?, organization = ?,
+        group_type = ?, group_size = ?, shirt_size = ?, role = ?, location = ?,
+        shift = ?, arrival_time = ?, early_arrival = ?, experience = ?,
+        hear_about = ?, sms_opt_in = ?, notes = ?,
+        status = COALESCE(?, status),
+        event_data = ?, updated_at = ?
+       WHERE id = ?`
+    ).bind(
+      body.first_name.trim(), body.last_name.trim(),
+      body.phone || null, body.organization || null,
+      body.group_type || 'individual', body.group_size || 1, body.shirt_size || null,
+      body.role || null, body.location || null, body.shift || null,
+      body.arrival_time || null, body.early_arrival ? 1 : 0,
+      body.experience || null, body.hear_about || null,
+      body.sms_opt_in ? 1 : 0, body.notes || null,
+      body.status || null,
+      Object.keys(extra).length ? JSON.stringify(extra) : null,
+      now, id,
+    ).run();
+  } else {
+    id = nanoid();
+    action = 'created';
+    const status = body.status || 'pending';
+    const createdAt = body.created_at || now;
+    await env.DB.prepare(
+      `INSERT INTO volunteers
+        (id, event_slug, first_name, last_name, email, phone, organization,
+         group_type, group_size, shirt_size, role, location, shift,
+         arrival_time, early_arrival, experience, hear_about, sms_opt_in, notes,
+         status, event_data, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      id, body.event_slug, body.first_name.trim(), body.last_name.trim(),
+      email, body.phone || null, body.organization || null,
+      body.group_type || 'individual', body.group_size || 1, body.shirt_size || null,
+      body.role || null, body.location || null, body.shift || null,
+      body.arrival_time || null, body.early_arrival ? 1 : 0,
+      body.experience || null, body.hear_about || null,
+      body.sms_opt_in ? 1 : 0, body.notes || null,
+      status,
+      Object.keys(extra).length ? JSON.stringify(extra) : null,
+      createdAt, now,
+    ).run();
+  }
+
+  // Fire-and-forget confirmation email (skip for mirrored signups — origin sends its own)
+  if (!isMirror && action === 'created' && env.RESEND_API_KEY) {
     const evtRow = await env.DB.prepare(`SELECT name, event_date, venue FROM events WHERE slug = ?`)
       .bind(body.event_slug).first();
     if (evtRow) {
       const subject = `Thanks for volunteering — ${evtRow.name}`;
       const text = `Hi ${body.first_name},\n\nThank you for signing up to volunteer for ${evtRow.name} on ${evtRow.event_date} at ${evtRow.venue}.\n\nWe'll send more details as the event approaches.\n\n— Davis Education Foundation`;
-      try { await sendEmail(env, { to: body.email, subject, text }); } catch (e) { console.error('confirm email failed', e); }
+      try { await sendEmail(env, { to: email, subject, text }); } catch (e) { console.error('confirm email failed', e); }
     }
   }
 
-  // Fire-and-forget Google Sheets append (don't block response)
+  // Fire-and-forget Google Sheets sync (don't block response)
   if (env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GALA_VOLUNTEERS_SHEET_ID) {
     try {
       const fullVol = await env.DB.prepare(`SELECT * FROM volunteers WHERE id = ?`).bind(id).first();
-      await appendVolunteerRow(env, fullVol);
-    } catch (e) { console.error('sheets append failed', e); }
+      if (action === 'updated') {
+        await updateVolunteerRow(env, fullVol);
+      } else {
+        await appendVolunteerRow(env, fullVol);
+      }
+    } catch (e) { console.error('sheets sync failed', e); }
   }
 
-  return json({ ok: true, id, status: 'pending' }, { status: 201 });
+  return json({ ok: true, id, action }, { status: action === 'created' ? 201 : 200 });
 });
 
 // -- Auth --
