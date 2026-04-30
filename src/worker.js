@@ -231,6 +231,10 @@ function roleForEmail(env, email) {
 }
 
 // ---------- Volunteer validation ----------
+// NOTE: phone is required at the form layer (gala-volunteer.html, volunteer.html hub,
+// forekids-volunteer.html, childspree volunteer form). It's left optional here so
+// (a) backfill of historical rows that may lack phone doesn't fail, and
+// (b) mirror calls from legacy backends remain forgiving.
 const REQUIRED_VOL_FIELDS = ['event_slug', 'first_name', 'last_name', 'email'];
 
 function validateVolunteer(body) {
