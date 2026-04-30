@@ -172,7 +172,20 @@ export async function ensureHeaders(env) {
 /* --------------------------- JWT → access token ------------------------- */
 
 async function getAccessToken(saJsonStr) {
-  const sa = typeof saJsonStr === 'string' ? JSON.parse(saJsonStr) : saJsonStr;
+  // Accept either: (a) raw JSON string, (b) base64-encoded JSON
+  let sa;
+  if (typeof saJsonStr === 'object') {
+    sa = saJsonStr;
+  } else {
+    let str = saJsonStr.trim();
+    // Try plain JSON first; if that fails, try base64-decode.
+    try {
+      sa = JSON.parse(str);
+    } catch {
+      const decoded = atob(str);
+      sa = JSON.parse(decoded);
+    }
+  }
   const now = Math.floor(Date.now() / 1000);
   const claims = {
     iss: sa.client_email,

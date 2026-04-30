@@ -718,6 +718,8 @@ function parseEventConfig(row) {
 }
 
 // ---------- Main fetch handler ----------
+
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
