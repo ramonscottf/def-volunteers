@@ -149,11 +149,11 @@ async function readSession(env, token) {
 }
 
 function setSessionCookie(token) {
-  return `${SESSION_COOKIE}=${token}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=${SESSION_TTL_SECS}`;
+  return `${SESSION_COOKIE}=${token}; Path=/; Domain=.daviskids.org; Secure; HttpOnly; SameSite=None; Max-Age=${SESSION_TTL_SECS}`;
 }
 
 function clearSessionCookie() {
-  return `${SESSION_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=0`;
+  return `${SESSION_COOKIE}=; Path=/; Domain=.daviskids.org; Secure; HttpOnly; SameSite=None; Max-Age=0`;
 }
 
 function readCookie(req, name) {
@@ -415,6 +415,114 @@ router.post('/api/auth/session', async (req, env) => {
   return new Response(JSON.stringify({ ok: true, email, role: 'admin' }), {
     status: 200,
     headers: { 'content-type': 'application/json', 'set-cookie': setSessionCookie(token) },
+  });
+});
+
+// -- Magic link auth (passwordless email login) --
+router.post('/api/auth/magic-link/request', async (req, env) => {
+  let body;
+  try { body = await req.json(); } catch { return err(400, 'invalid JSON'); }
+  const email = (body.email || '').trim().toLowerCase();
+  if (!email || !email.includes('@')) return err(400, 'valid email required');
+
+  // Always return success — don't leak whether an email is on the allowlist
+  if (roleForEmail(env, email) !== 'admin') {
+    return json({ ok: true });
+  }
+
+  // Sign a short-lived (15 min) magic link token using the same HMAC pattern as sessions
+  const linkPayload = {
+    email,
+    purpose: 'magic-link',
+    iat: Date.now(),
+    exp: Date.now() + 15 * 60 * 1000,
+  };
+  const data = base64UrlEncode(new TextEncoder().encode(JSON.stringify(linkPayload)));
+  const sig = await hmacSign(env.SESSION_SECRET, data);
+  const linkToken = `${data}.${sig}`;
+
+  const origin = new URL(req.url).origin;
+  // Magic link points back at the dashboard's origin so the cookie set on the API origin is shared
+  const verifyUrl = `${origin}/api/auth/magic-link/verify?token=${encodeURIComponent(linkToken)}`;
+
+  if (env.RESEND_API_KEY) {
+    try {
+      await sendEmail(env, {
+        to: email,
+        subject: 'Your DEF Volunteer Admin sign-in link',
+        text:
+`Hi,
+
+Click this link to sign in to the DEF Volunteer Admin dashboard:
+
+${verifyUrl}
+
+This link expires in 15 minutes and can only be used once. If you didn't request this, you can ignore this email.
+
+— Davis Education Foundation`,
+        html: `<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:520px;margin:0 auto;padding:24px">
+<h2 style="color:#0d1b3d;margin:0 0 16px;font-family:Georgia,serif;font-weight:400">Your sign-in link</h2>
+<p style="color:#1a1a1a;line-height:1.5">Click the button below to sign in to the DEF Volunteer Admin dashboard.</p>
+<p style="margin:28px 0">
+  <a href="${verifyUrl}" style="background:#0d1b3d;color:#fff;text-decoration:none;padding:14px 28px;border-radius:6px;font-weight:600;display:inline-block">Sign in to Volunteer Admin</a>
+</p>
+<p style="color:#5a6276;font-size:13px;line-height:1.5">This link expires in 15 minutes. If you didn't request it, you can ignore this email.</p>
+<p style="color:#5a6276;font-size:13px;line-height:1.5;word-break:break-all">Or paste this URL into your browser:<br>${verifyUrl}</p>
+<hr style="border:0;border-top:1px solid #d8dde6;margin:28px 0 16px">
+<p style="color:#5a6276;font-size:12px">Davis Education Foundation</p>
+</div>`,
+      });
+    } catch (e) {
+      console.error('magic link email failed', e);
+      return err(500, 'failed to send sign-in email');
+    }
+  } else {
+    console.log('DEV: magic link =', verifyUrl);
+  }
+
+  return json({ ok: true });
+});
+
+router.get('/api/auth/magic-link/verify', async (req, env) => {
+  const url = new URL(req.url);
+  const token = url.searchParams.get('token');
+  if (!token) return new Response('Missing token', { status: 400 });
+
+  const [data, sig] = token.split('.');
+  if (!data || !sig) return new Response('Invalid token', { status: 400 });
+  if (!(await hmacVerify(env.SESSION_SECRET, data, sig))) {
+    return new Response('Invalid or tampered link. Request a new sign-in link.', { status: 401 });
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(data)));
+  } catch {
+    return new Response('Malformed token', { status: 400 });
+  }
+  if (payload.purpose !== 'magic-link') return new Response('Wrong token type', { status: 400 });
+  if (!payload.exp || payload.exp < Date.now()) {
+    return new Response('This link has expired. Request a new one.', { status: 401 });
+  }
+  if (roleForEmail(env, payload.email) !== 'admin') {
+    return new Response('This email is no longer authorized.', { status: 403 });
+  }
+
+  const sessionToken = await createSession(env, {
+    email: payload.email,
+    name: payload.email,
+    role: 'admin',
+    method: 'magic-link',
+  });
+
+  // Redirect to the dashboard with the cookie set
+  const dashboardUrl = 'https://daviskids.org/volunteer-admin/';
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'location': dashboardUrl,
+      'set-cookie': setSessionCookie(sessionToken),
+    },
   });
 });
 
