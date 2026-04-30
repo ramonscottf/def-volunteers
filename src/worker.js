@@ -6,6 +6,8 @@
  * Native Workers ESM — no build step. Single file for easy inspection and deploy.
  */
 
+import { appendVolunteerRow, updateVolunteerRow, rebuildAllSheets, ensureHeaders } from './sheets.js';
+
 // ---------- Config ----------
 const ALLOWED_ORIGINS = new Set([
   'https://daviskids.org',
@@ -382,6 +384,14 @@ router.post('/api/volunteers', async (req, env) => {
     }
   }
 
+  // Fire-and-forget Google Sheets append (don't block response)
+  if (env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GALA_VOLUNTEERS_SHEET_ID) {
+    try {
+      const fullVol = await env.DB.prepare(`SELECT * FROM volunteers WHERE id = ?`).bind(id).first();
+      await appendVolunteerRow(env, fullVol);
+    } catch (e) { console.error('sheets append failed', e); }
+  }
+
   return json({ ok: true, id, status: 'pending' }, { status: 201 });
 });
 
@@ -481,6 +491,13 @@ router.patch('/api/admin/volunteers/:id', async (req, env, params) => {
   binds.push(params.id);
   await env.DB.prepare(`UPDATE volunteers SET ${sets.join(', ')} WHERE id = ?`).bind(...binds).run();
   const row = await env.DB.prepare(`SELECT * FROM volunteers WHERE id = ?`).bind(params.id).first();
+
+  // Fire-and-forget Google Sheets update (don't block response)
+  if (env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GALA_VOLUNTEERS_SHEET_ID && row) {
+    try { await updateVolunteerRow(env, row); }
+    catch (e) { console.error('sheets update failed', e); }
+  }
+
   return json({ ok: true, volunteer: row });
 });
 
@@ -489,7 +506,39 @@ router.delete('/api/admin/volunteers/:id', async (req, env, params) => {
   if (!session) return err(401, 'unauthorized');
   await env.DB.prepare(`UPDATE volunteers SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?`)
     .bind(params.id).run();
+
+  // Sync the cancellation to the Sheet
+  if (env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GALA_VOLUNTEERS_SHEET_ID) {
+    try {
+      const row = await env.DB.prepare(`SELECT * FROM volunteers WHERE id = ?`).bind(params.id).first();
+      if (row) await updateVolunteerRow(env, row);
+    } catch (e) { console.error('sheets cancel sync failed', e); }
+  }
+
   return json({ ok: true });
+});
+
+// -- Admin Sheets sync controls --
+router.post('/api/admin/sheets/init', async (req, env) => {
+  const session = await requireAdmin(req, env);
+  if (!session) return err(401, 'unauthorized');
+  try {
+    const result = await ensureHeaders(env);
+    return json({ ok: true, result });
+  } catch (e) {
+    return err(500, 'init failed', { detail: e.message });
+  }
+});
+
+router.post('/api/admin/sheets/rebuild', async (req, env) => {
+  const session = await requireAdmin(req, env);
+  if (!session) return err(401, 'unauthorized');
+  try {
+    const result = await rebuildAllSheets(env, env.DB);
+    return json({ ok: true, result });
+  } catch (e) {
+    return err(500, 'rebuild failed', { detail: e.message });
+  }
 });
 
 // -- Admin stats --
