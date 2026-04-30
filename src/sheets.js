@@ -106,6 +106,36 @@ export async function updateVolunteerRow(env, volunteer) {
 }
 
 /**
+ * Rebuild a single event's tab from D1. Used after hard-delete or any
+ * operation that needs to remove rows (Sheets API can't easily delete rows by content).
+ */
+export async function rebuildEventSheet(env, db, eventSlug) {
+  const sheetId = env.GALA_VOLUNTEERS_SHEET_ID;
+  if (!sheetId || !env.GOOGLE_SERVICE_ACCOUNT_JSON) return { skipped: true };
+  const tab = tabFor(eventSlug);
+  const token = await getAccessToken(env.GOOGLE_SERVICE_ACCOUNT_JSON);
+
+  // Clear data rows below header
+  const clearUrl = `${SHEETS_API}/${sheetId}/values/${encodeURIComponent(`${tab}!A2:P10000`)}:clear`;
+  await fetch(clearUrl, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+
+  const vols = await db.prepare(
+    `SELECT * FROM volunteers WHERE event_slug = ? ORDER BY created_at ASC`
+  ).bind(eventSlug).all();
+  const rows = (vols.results || []).map(rowFromVolunteer);
+  if (rows.length === 0) return { ok: true, rows: 0 };
+
+  const writeUrl = `${SHEETS_API}/${sheetId}/values/${encodeURIComponent(`${tab}!A2`)}?valueInputOption=USER_ENTERED`;
+  const r = await fetch(writeUrl, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values: rows }),
+  });
+  if (!r.ok) throw new Error(`rebuild ${tab}: ${r.status} ${await r.text()}`);
+  return { ok: true, rows: rows.length };
+}
+
+/**
  * Full backfill — wipe each tab and rewrite from D1. Use sparingly (admin only).
  */
 export async function rebuildAllSheets(env, db) {

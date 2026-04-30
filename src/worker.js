@@ -6,7 +6,7 @@
  * Native Workers ESM — no build step. Single file for easy inspection and deploy.
  */
 
-import { appendVolunteerRow, updateVolunteerRow, rebuildAllSheets, ensureHeaders } from './sheets.js';
+import { appendVolunteerRow, updateVolunteerRow, rebuildAllSheets, ensureHeaders, rebuildEventSheet } from './sheets.js';
 
 // ---------- Config ----------
 const ALLOWED_ORIGINS = new Set([
@@ -516,6 +516,29 @@ router.delete('/api/admin/volunteers/:id', async (req, env, params) => {
   }
 
   return json({ ok: true });
+});
+
+// Hard delete — removes the record entirely from D1 and clears the corresponding row in the Sheet
+router.delete('/api/admin/volunteers/:id/hard', async (req, env, params) => {
+  const session = await requireAdmin(req, env);
+  if (!session) return err(401, 'unauthorized');
+
+  // Snapshot before delete so we can clear the Sheet row by ID
+  const row = await env.DB.prepare(`SELECT * FROM volunteers WHERE id = ?`).bind(params.id).first();
+  if (!row) return err(404, 'not found');
+
+  // Hard-remove from D1
+  await env.DB.prepare(`DELETE FROM volunteers WHERE id = ?`).bind(params.id).run();
+
+  // Clear the corresponding row in the Sheet (find by ID in column A, blank the row)
+  if (env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GALA_VOLUNTEERS_SHEET_ID) {
+    try {
+      // Sheets API can't easily delete a single row by ID; rebuild this event's tab from D1.
+      await rebuildEventSheet(env, env.DB, row.event_slug);
+    } catch (e) { console.error('sheets hard-delete sync failed', e); }
+  }
+
+  return json({ ok: true, deleted: row.id });
 });
 
 // -- Admin Sheets sync controls --
