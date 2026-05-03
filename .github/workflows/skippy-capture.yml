@@ -1,0 +1,111 @@
+name: Skippy Capture
+
+on:
+  push:
+    branches: ['**']
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    # Don't fail the push if Skippy is unreachable — capture is best-effort
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Capture commits to Skippy memory
+        env:
+          SKIPPY_TOKEN: ${{ secrets.SKIPPY_CAPTURE_TOKEN }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_FULL: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          if [ -z "$SKIPPY_TOKEN" ]; then
+            echo "SKIPPY_CAPTURE_TOKEN not set — skipping"
+            exit 0
+          fi
+          python3 - <<'PYEOF'
+          import json, os, subprocess, urllib.request, sys
+
+          token = os.environ["SKIPPY_TOKEN"]
+          repo = os.environ["REPO_NAME"]
+          repo_full = os.environ["REPO_FULL"]
+          branch = os.environ["BRANCH"]
+          actor = os.environ["ACTOR"]
+          before = os.environ.get("BEFORE", "")
+          after = os.environ.get("AFTER", "")
+
+          # Resolve commit list. Push events expose before..after.
+          # On first push to a branch BEFORE is all-zeros — fall back to AFTER alone.
+          if before and not before.startswith("00000000"):
+              rng = f"{before}..{after}"
+          else:
+              rng = after or "HEAD"
+
+          try:
+              shas = subprocess.check_output(
+                  ["git", "rev-list", "--reverse", rng], text=True
+              ).strip().split("\n")
+              shas = [s for s in shas if s]
+          except subprocess.CalledProcessError:
+              shas = [after or subprocess.check_output(["git","rev-parse","HEAD"], text=True).strip()]
+
+          print(f"Capturing {len(shas)} commit(s) for {repo_full}")
+
+          for sha in shas:
+              try:
+                  msg = subprocess.check_output(
+                      ["git", "show", "-s", "--format=%B", sha], text=True
+                  ).rstrip()
+                  author_date = subprocess.check_output(
+                      ["git", "show", "-s", "--format=%aI", sha], text=True
+                  ).strip()
+                  author_login = subprocess.check_output(
+                      ["git", "show", "-s", "--format=%an", sha], text=True
+                  ).strip()
+                  numstat = subprocess.check_output(
+                      ["git", "show", "--numstat", "--format=", sha], text=True
+                  )
+                  files = []
+                  for line in numstat.strip().split("\n"):
+                      if not line.strip():
+                          continue
+                      parts = line.split("\t")
+                      if len(parts) != 3:
+                          continue
+                      a, d, p = parts
+                      files.append({
+                          "path": p,
+                          "additions": int(a) if a != "-" else 0,
+                          "deletions": int(d) if d != "-" else 0,
+                      })
+                  payload = {
+                      "repo": repo,
+                      "branch": branch,
+                      "sha": sha,
+                      "author": actor or author_login,
+                      "message": msg,
+                      "url": f"https://github.com/{repo_full}/commit/{sha}",
+                      "files": files,
+                      "created_at": author_date,
+                  }
+                  req = urllib.request.Request(
+                      "https://omi.fosterlabs.org/memory/github",
+                      data=json.dumps(payload).encode("utf-8"),
+                      headers={
+                          "Authorization": f"Bearer {token}",
+                          "Content-Type": "application/json",
+                          "User-Agent": "skippy-capture-action/1.0",
+                      },
+                      method="POST",
+                  )
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      body = resp.read().decode()
+                      print(f"  {sha[:7]} → HTTP {resp.status}: {body}")
+              except Exception as e:
+                  print(f"  {sha[:7]} → ERROR: {e}", file=sys.stderr)
+          PYEOF
